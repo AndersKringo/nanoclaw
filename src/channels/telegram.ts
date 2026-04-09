@@ -5,7 +5,7 @@ import path from 'path';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
-import { readAllEnvFile, readEnvFile } from '../env.js';
+import { readAllEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -118,7 +118,10 @@ export class TelegramChannel implements Channel {
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: new https.Agent({ keepAlive: true }), compress: true },
+        baseFetchConfig: {
+          agent: new https.Agent({ keepAlive: true }),
+          compress: true,
+        },
       },
     });
 
@@ -250,7 +253,8 @@ export class TelegramChannel implements Channel {
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
-      if (!group || (group.botTokenKey ?? undefined) !== this.botTokenKey) return;
+      if (!group || (group.botTokenKey ?? undefined) !== this.botTokenKey)
+        return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -438,31 +442,32 @@ export class TelegramChannel implements Channel {
   }
 }
 
-// Register the default Telegram bot (TELEGRAM_BOT_TOKEN)
-registerChannel('telegram', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN']);
-  const token =
-    process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
-  if (!token) {
-    logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
-    return null;
-  }
-  return new TelegramChannel(token, opts, undefined);
-});
-
-// Register additional Telegram bots for groups with a botTokenKey.
-// Any env var matching TELEGRAM_BOT_TOKEN_<KEY> spins up a dedicated bot instance.
-// Example: TELEGRAM_BOT_TOKEN_HUGIN → botTokenKey 'HUGIN'
-(function registerExtraTelegramBots() {
+// Register one TelegramChannel per TELEGRAM_BOT_TOKEN_<NAME> env var.
+// Example: TELEGRAM_BOT_TOKEN_MUNIN and TELEGRAM_BOT_TOKEN_HUGIN spin up two bots.
+// Fallback: if no _<NAME> vars exist, TELEGRAM_BOT_TOKEN is used for backwards compatibility.
+(function registerTelegramBots() {
   const allEnv = { ...process.env, ...readAllEnvFile() };
   const PREFIX = 'TELEGRAM_BOT_TOKEN_';
-  const keys = Object.keys(allEnv).filter((k) => k.startsWith(PREFIX));
-  for (const envKey of keys) {
-    const tokenKey = envKey.slice(PREFIX.length);
-    const token = allEnv[envKey] || '';
-    if (!token) continue;
-    registerChannel(`telegram_${tokenKey}`, (opts: ChannelOpts) => {
-      return new TelegramChannel(token, opts, tokenKey);
-    });
+  const namedKeys = Object.keys(allEnv).filter((k) => k.startsWith(PREFIX));
+
+  if (namedKeys.length > 0) {
+    for (const envKey of namedKeys) {
+      const tokenKey = envKey.slice(PREFIX.length);
+      const token = allEnv[envKey] || '';
+      if (!token) continue;
+      registerChannel(`telegram_${tokenKey}`, (opts: ChannelOpts) => {
+        return new TelegramChannel(token, opts, tokenKey);
+      });
+    }
+  } else {
+    // Backwards compatibility: single TELEGRAM_BOT_TOKEN with no named key
+    const token = allEnv['TELEGRAM_BOT_TOKEN'] || '';
+    if (!token) {
+      logger.warn('Telegram: no TELEGRAM_BOT_TOKEN_<NAME> vars found');
+    } else {
+      registerChannel('telegram', (opts: ChannelOpts) => {
+        return new TelegramChannel(token, opts, undefined);
+      });
+    }
   }
 })();
