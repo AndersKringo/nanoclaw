@@ -5,7 +5,7 @@ import path from 'path';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
-import { readEnvFile } from '../env.js';
+import { readAllEnvFile, readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -51,10 +51,17 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private botTokenKey: string | undefined;
 
-  constructor(botToken: string, opts: TelegramChannelOpts) {
+  constructor(
+    botToken: string,
+    opts: TelegramChannelOpts,
+    botTokenKey?: string,
+  ) {
     this.botToken = botToken;
     this.opts = opts;
+    this.botTokenKey = botTokenKey;
+    this.name = botTokenKey ? `telegram_${botTokenKey}` : 'telegram';
   }
 
   /**
@@ -111,7 +118,7 @@ export class TelegramChannel implements Channel {
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: https.globalAgent, compress: true },
+        baseFetchConfig: { agent: new https.Agent({ keepAlive: true }), compress: true },
       },
     });
 
@@ -204,12 +211,12 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      // Only deliver full message for registered groups
+      // Only deliver full message for registered groups owned by this bot instance
       const group = this.opts.registeredGroups()[chatJid];
-      if (!group) {
+      if (!group || (group.botTokenKey ?? undefined) !== this.botTokenKey) {
         logger.debug(
           { chatJid, chatName },
-          'Message from unregistered Telegram chat',
+          'Message from unregistered or foreign Telegram chat',
         );
         return;
       }
@@ -243,7 +250,7 @@ export class TelegramChannel implements Channel {
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
-      if (!group) return;
+      if (!group || (group.botTokenKey ?? undefined) !== this.botTokenKey) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -406,7 +413,10 @@ export class TelegramChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.startsWith('tg:');
+    if (!jid.startsWith('tg:')) return false;
+    const group = this.opts.registeredGroups()[jid];
+    if (!group) return false;
+    return (group.botTokenKey ?? undefined) === this.botTokenKey;
   }
 
   async disconnect(): Promise<void> {
@@ -428,6 +438,7 @@ export class TelegramChannel implements Channel {
   }
 }
 
+// Register the default Telegram bot (TELEGRAM_BOT_TOKEN)
 registerChannel('telegram', (opts: ChannelOpts) => {
   const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN']);
   const token =
@@ -436,5 +447,22 @@ registerChannel('telegram', (opts: ChannelOpts) => {
     logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
     return null;
   }
-  return new TelegramChannel(token, opts);
+  return new TelegramChannel(token, opts, undefined);
 });
+
+// Register additional Telegram bots for groups with a botTokenKey.
+// Any env var matching TELEGRAM_BOT_TOKEN_<KEY> spins up a dedicated bot instance.
+// Example: TELEGRAM_BOT_TOKEN_HUGIN → botTokenKey 'HUGIN'
+(function registerExtraTelegramBots() {
+  const allEnv = { ...process.env, ...readAllEnvFile() };
+  const PREFIX = 'TELEGRAM_BOT_TOKEN_';
+  const keys = Object.keys(allEnv).filter((k) => k.startsWith(PREFIX));
+  for (const envKey of keys) {
+    const tokenKey = envKey.slice(PREFIX.length);
+    const token = allEnv[envKey] || '';
+    if (!token) continue;
+    registerChannel(`telegram_${tokenKey}`, (opts: ChannelOpts) => {
+      return new TelegramChannel(token, opts, tokenKey);
+    });
+  }
+})();

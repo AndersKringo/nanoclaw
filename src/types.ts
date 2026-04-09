@@ -40,6 +40,7 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  botTokenKey?: string; // Optional: env var suffix for a dedicated bot token (e.g. 'HUGIN' → TELEGRAM_BOT_TOKEN_HUGIN)
 }
 
 export interface NewMessage {
